@@ -3,9 +3,10 @@
 
 import asyncio
 import collections
+import sys
 
 from .connection import connect
-from .utils import _PoolContextManager, _PoolConnectionContextManager
+from .utils import _PoolConnectionContextManager, _PoolContextManager
 
 __all__ = ['create_pool', 'Pool']
 
@@ -25,7 +26,7 @@ async def _create_pool(minsize=10, maxsize=10, echo=False, loop=None,
     pool = Pool(minsize=minsize, maxsize=maxsize, echo=echo, loop=loop,
                 pool_recycle=pool_recycle, **kwargs)
     if minsize > 0:
-        with (await pool._cond):
+        async with pool._cond:
             await pool._fill_free_pool(False)
     return pool
 
@@ -44,7 +45,9 @@ class Pool(asyncio.AbstractServer):
         self._acquiring = 0
         self._recycle = pool_recycle
         self._free = collections.deque(maxlen=maxsize)
-        self._cond = asyncio.Condition(loop=loop)
+        self._cond = asyncio.Condition(
+            **({"loop": loop} if sys.version_info[:2] < (3, 8) else {})
+        )
         self._used = set()
         self._closing = False
         self._closed = False
@@ -76,7 +79,7 @@ class Pool(asyncio.AbstractServer):
 
     async def clear(self):
         """Close all free connections in pool."""
-        with (await self._cond):
+        async with self._cond:
             while self._free:
                 conn = self._free.popleft()
                 await conn.close()
@@ -105,7 +108,7 @@ class Pool(asyncio.AbstractServer):
             conn = self._free.popleft()
             await conn.close()
 
-        with (await self._cond):
+        async with self._cond:
             while self.size > self.freesize:
                 await self._cond.wait()
 
@@ -119,7 +122,7 @@ class Pool(asyncio.AbstractServer):
     async def _acquire(self):
         if self._closing:
             raise RuntimeError("Cannot acquire connection after closing pool")
-        with (await self._cond):
+        async with self._cond:
             while True:
                 await self._fill_free_pool(True)
                 if self._free:
@@ -168,7 +171,7 @@ class Pool(asyncio.AbstractServer):
                 self._acquiring -= 1
 
     async def _wakeup(self):
-        with (await self._cond):
+        async with self._cond:
             self._cond.notify()
 
     async def release(self, conn):
